@@ -3,12 +3,11 @@ import csv
 import json
 from itertools import combinations, chain
 flatten = chain.from_iterable # alias
-from collections import Counter
+from collections import defaultdict
 import operator
 
 # external
 import pandas
-from nltk.corpus import sentiwordnet
 
 class CharacterNetwork:
 
@@ -52,36 +51,46 @@ class CharacterNetwork:
         ###################
 
         # Create vertices w/ attributes
-        vertex_attr = ['Label', 'Gender']
-        self.vertex_df = pandas.DataFrame(index=xrange(len(char_data)), columns=vertex_attr)
-        self.vertex_df['Label'] = [char['names'][0]['n'] if char['names'] else 'UNK' for char in char_data]
+        vertex_attr = ['label']
         if gender:
-            self.vertex_df['Gender'] = [
+            vertex_attr += ['gender']
+        self.vertex_df = pandas.DataFrame(index=xrange(len(char_data)), columns=vertex_attr)
+        self.vertex_df['label'] = [char['names'][0]['n'] if char['names'] else 'UNK' for char in char_data]
+        if gender:
+            self.vertex_df['gender'] = [
                 self.__get_gender(tokens_df[tokens_df['characterId'] == char_id]['lemma']) 
                 for char_id in self.vertex_df.index]
 
         # Create edges w/ attributes
-        edge_attr = ['Source', 'Target', 'Weight']
+        edge_attr = ['weight']
         if sentiment:
-            edge_attr += ['Pos', 'Neg', 'Obj']
-        interactions = {}
+            from nltk.corpus import sentiwordnet
+            edge_attr += ['avg_pos', 'avg_neg', 'avg_obj']
+
+        edge_dict = defaultdict(lambda:[0]*len(edge_attr))
         # Get character groups for each sentence or paragraph
         for sentenceID, group in tokens_df[tokens_df['characterId'] != -1].groupby(strategy)['characterId'].unique().iteritems():
             if len(group) > 1:
                 if sentiment:
-                    score = self.__get_sentiment(tokens_df[tokens_df[strategy] == sentenceID]['lemma'])
+                    score = self.__get_sentiment(tokens_df[tokens_df[strategy] == sentenceID]['lemma'], sentiwordnet)
                 else:
                     score = []
                 # form an edge out of all unique pairs of the group
                 for edge in combinations(group, 2):
-                    interactions[edge] = map(operator.add, interactions.get(edge, [0]*(1+len(score))),[1] + score)
-        self.edge_df = pandas.DataFrame(([k[0], k[1]] + v for k,v in interactions.viewitems()), columns=edge_attr)
+                    edge_dict[edge] = map(operator.add, edge_dict[edge], [1] + score)
+       
+        if sentiment:
+             # average pos,neg,obj scores by weight
+            edge_dict = {k:v[:1] + map(lambda x:float(x)/v[0], v[1:]) for k,v in edge_dict.iteritems()}
+
+        self.edge_df = pandas.DataFrame.from_dict(edge_dict, orient='index')
+        self.edge_df.columns = edge_attr
 
     ########################
     #### HELPER METHODS ####
     ########################
 
-    def __get_sentiment(self, lemmas):
+    def __get_sentiment(self, lemmas, sentiwordnet):
         ''' Assign a gender to a given character.
         
             :param lemmas: list of lemmas to use for assigning sentiment.
@@ -127,23 +136,20 @@ class CharacterNetwork:
 
 
     def get_igraph(self):
-        ''' Get an igraph.Graph object for graph theoretical social network analysis.
+        ''' Get an igraph.Graph object for all graph theoretical needs.
 
-            :returns: a weighted igraph.Graph object
+            :returns: a igraph.Graph object
         '''
         import igraph
+
         graph = igraph.Graph()
+
         graph.add_vertices(self.vertex_df.index.values)
-        graph.add_edges(zip(self.edge_df['Source'], self.edge_df['Target']))
-        graph.es['weight'] = self.edge_df['Weight']
+        for attribute in self.vertex_df:
+            graph.vs[attribute] = self.vertex_df[attribute]
+
+        graph.add_edges(self.edge_df.index.values)
+        for attribute in self.edge_df:
+            graph.es[attribute] = self.edge_df[attribute]
+
         return graph
-
-
-    def to_csv(self, vertex_file, edge_file):
-        ''' Write the vertex attribute and edge attribute DataFrames to CSV files.
-
-            :param vertex_file: File for vertex csv.
-            :param edge_file: file for file csv.
-        '''
-        self.vertex_df.to_csv(path_or_buf=vertex_file, encoding='utf-8')
-        self.edge_df.to_csv(path_or_buf=edge_file, encoding='utf-8')
