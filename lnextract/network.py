@@ -13,53 +13,31 @@ class CharacterNetwork:
 
     SENTENCE = 'sentenceID'
     PARAGRAPH = 'paragraphId'
-    M = -1
-    F = 1
-    WORD_GENDERS = {
-        'Mr.' : M,
-        'he' : M,
-        'his' : M,
-        'him' : M,
-        'himself' : M,
+    VERTEX_ATTR = ['label', 'count', 'gender']
 
-        'Ms.' : F,
-        'Mrs.' : F,
-        'she' : F,
-        'her' : F,
-        'hers' : F,
-        'herself' : F,
-    }
-
-    def __init__(self, tokens_file, book_file, strategy='sentenceID', gender=True, sentiment=True):
+    def __init__(self, tokens_file, char_file, strategy='sentenceID', sentiment=False):
         ''' Creates an undirected, weighted graph of characters (vertices) and interactions (edges).
 
-            :param tokens_file: The bookNLP output token file.
-            :param book_file: The bookNLP output JSON .book file.
-            :param strategy: Grouping strategy for determining interactions. 
-                Also effects context window for sentiment analysis.
+            :param tokens_file: The bookNLP output token CSV file.
+            :param book_file: The bookNLP output character JSON file.
+            :param strategy: Grouping strategy for determining interactions (and sentiments). 
                 Supports CharacterNetwork.SENTENCE and CharacterNetwork.PARAGRAPH.
-            :param gender: Assign a gender to the characters.
             :param sentiments: Assign a sentiment to the interactions.
         '''
         ### LOAD FILES ###
-        # BookNLP output tokens csv into a Pandas DataFrame
+        # BookNLP tokens CSV into a Pandas DataFrame
         tokens_df = pandas.read_csv(filepath_or_buffer=tokens_file, sep='\t', 
             engine='c', quoting=csv.QUOTE_NONE)
 
-        # BookNLP .book file into a dictionary
-        char_data = json.load(book_file)['characters']
+        # BookNLP character JSON into a dictionary
+        char_data = json.load(char_file)['characters']
         ###################
 
         # Create vertices w/ attributes
-        vertex_attr = ['label']
-        if gender:
-            vertex_attr += ['gender']
-        self.vertex_df = pandas.DataFrame(index=xrange(len(char_data)), columns=vertex_attr)
-        self.vertex_df['label'] = [char['names'][0]['n'] if char['names'] else 'UNK' for char in char_data]
-        if gender:
-            self.vertex_df['gender'] = [
-                self.__get_gender(tokens_df[tokens_df['characterId'] == char_id]['lemma']) 
-                for char_id in self.vertex_df.index]
+        self.vertex_df = pandas.DataFrame(
+            data=[self.__get_char_attr(char) for char in char_data],
+            index=xrange(len(char_data)),
+            columns=CharacterNetwork.VERTEX_ATTR)
 
         # Create edges w/ attributes
         edge_attr = ['weight']
@@ -69,14 +47,16 @@ class CharacterNetwork:
 
         edge_dict = defaultdict(lambda:[0]*len(edge_attr))
         # Get character groups for each sentence or paragraph
-        for sentenceID, group in tokens_df[tokens_df['characterId'] != -1].groupby(strategy)['characterId'].unique().iteritems():
+        for context_id, group in tokens_df[tokens_df['characterId'] != -1].groupby(strategy)['characterId'].unique().iteritems():
             if len(group) > 1:
                 if sentiment:
-                    score = self.__get_sentiment(tokens_df[tokens_df[strategy] == sentenceID]['lemma'], sentiwordnet)
+                    score = self.__get_sentiment(tokens_df[tokens_df[strategy] == context_id]['lemma'], sentiwordnet)
                 else:
                     score = []
                 # form an edge out of all unique pairs of the group
                 for edge in combinations(group, 2):
+                    # undirected, so we don't want parallel edges.
+                    edge = tuple(sorted(edge))
                     edge_dict[edge] = map(operator.add, edge_dict[edge], [1] + score)
        
         if sentiment:
@@ -85,6 +65,8 @@ class CharacterNetwork:
 
         self.edge_df = pandas.DataFrame.from_dict(edge_dict, orient='index')
         self.edge_df.columns = edge_attr
+        if sentiment:
+            self.edge_df['pos-neg'] = self.edge_df['avg_pos'] - self.edge_df['avg_neg']
 
     ########################
     #### HELPER METHODS ####
@@ -107,19 +89,13 @@ class CharacterNetwork:
                     senti_synsets[0].obj_score()])
         return score
 
-
-    def __get_gender(self, lemmas):
-        ''' Assign a gender to a given character.
-
-            :param lemmas: list of words to use for assigning gender.
-
-            :returns: 'Male', 'Female', or 'UNK'
-        '''
-        score = sum(CharacterNetwork.WORD_GENDERS.get(lemma, 0) for lemma in lemmas)
-        if score < 0: return 'Male'
-        elif score > 0: return 'Female'
-        else: return 'UNK'
-
+    def __get_char_attr(self, char_dict):
+        name_list = char_dict['names']
+        label = name_list[0]['n'].encode('utf-8') if name_list else 'UNK'
+        gender_int = char_dict['g']
+        gender = 'female' if (gender_int == 1) else 'male' if (gender_int == 2) else 'UNK'
+        count = char_dict['NNPcount']
+        return (label, count, gender)
 
     #####################
     #### API METHODS ####
@@ -144,7 +120,7 @@ class CharacterNetwork:
 
         graph = igraph.Graph()
 
-        graph.add_vertices(self.vertex_df.index.values)
+        graph.add_vertices(len(self.vertex_df))
         for attribute in self.vertex_df:
             graph.vs[attribute] = self.vertex_df[attribute]
 
