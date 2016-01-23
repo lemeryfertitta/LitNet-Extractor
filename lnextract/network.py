@@ -15,14 +15,19 @@ class CharacterNetwork:
     PARAGRAPH = 'paragraphId'
     VERTEX_ATTR = ['label', 'count', 'gender']
 
-    def __init__(self, tokens_file, char_file, strategy='sentenceID', sentiment=False):
-        ''' Creates an undirected, weighted graph of characters (vertices) and interactions (edges).
+    def __init__(self, tokens_file, char_file, strategy='sentenceID',
+                 sentiment=False, aggregate=True):
+        ''' Creates an undirected, weighted graph of characters (vertices) and 
+            interactions (edges).
 
             :param tokens_file: The bookNLP output token CSV file.
             :param book_file: The bookNLP output character JSON file.
-            :param strategy: Grouping strategy for determining interactions (and sentiments). 
-                Supports CharacterNetwork.SENTENCE and CharacterNetwork.PARAGRAPH.
+            :param strategy: Grouping strategy for determining interactions 
+                (and sentiments). Supports CharacterNetwork.SENTENCE and 
+                CharacterNetwork.PARAGRAPH.
             :param sentiments: Assign a sentiment to the interactions.
+            :param aggregate: If True, edges will be unique and weighted. 
+                If false, all edges are recorded, as well as their sentenceID.
         '''
         ### LOAD FILES ###
         # BookNLP tokens CSV into a Pandas DataFrame
@@ -40,10 +45,17 @@ class CharacterNetwork:
             columns=CharacterNetwork.VERTEX_ATTR)
 
         # Create edges w/ attributes
-        edge_attr = ['weight']
+        if aggregate:
+            edge_attr = ['weight']
+        else:
+            edge_attr = ['sentence_no']
+
         if sentiment:
             from nltk.corpus import sentiwordnet
-            edge_attr += ['avg_pos', 'avg_neg', 'avg_obj']
+            if aggregate:
+                edge_attr += ['avg_pos', 'avg_neg', 'avg_obj']
+            else:
+                edge_attr += ['pos', 'neg', 'obj']
 
         edge_dict = defaultdict(lambda:[0]*len(edge_attr))
         # Get character groups for each sentence or paragraph
@@ -57,15 +69,18 @@ class CharacterNetwork:
                 for edge in combinations(group, 2):
                     # undirected, so we don't want parallel edges.
                     edge = tuple(sorted(edge))
-                    edge_dict[edge] = map(operator.add, edge_dict[edge], [1] + score)
-       
-        if sentiment:
+                    if aggregate:
+                        edge_dict[edge] = map(operator.add, edge_dict[edge], [1] + score)
+                    else:
+                        edge_dict[edge] = [context_id] + map(operator.add, edge_dict[edge][1:], score)
+
+        if sentiment and aggregate:
              # average pos,neg,obj scores by weight
             edge_dict = {k:v[:1] + map(lambda x:float(x)/v[0], v[1:]) for k,v in edge_dict.iteritems()}
 
         self.edge_df = pandas.DataFrame.from_dict(edge_dict, orient='index')
         self.edge_df.columns = edge_attr
-        if sentiment:
+        if sentiment and aggregate:
             self.edge_df['pos-neg'] = self.edge_df['avg_pos'] - self.edge_df['avg_neg']
 
     ########################
@@ -87,6 +102,7 @@ class CharacterNetwork:
                     [senti_synsets[0].pos_score(),
                     senti_synsets[0].neg_score(),
                     senti_synsets[0].obj_score()])
+        score = [s/len(lemmas) for s in score]
         return score
 
     def __get_char_attr(self, char_dict):
@@ -109,6 +125,7 @@ class CharacterNetwork:
     def get_edges(self):
         ''' :returns: a copy of the edge DataFrame '''
         return self.edge_df.copy()
+
 
 
     def get_igraph(self):
